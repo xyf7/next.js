@@ -5,6 +5,7 @@ use std::{
     sync::LazyLock,
 };
 
+use anyhow::Context;
 use dashmap::DashMap;
 use serde::{de::DeserializeOwned, Serialize};
 use turbo_rcstr::RcStr;

@@ -5,7 +5,7 @@ use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterato
 use serde::Serialize;
 use smallvec::SmallVec;
 use tracing::Span;
-use turbo_persistence::interning_serde::{self, RcStrToLocalId};
+use turbo_persistence::interning_serde;
 use turbo_rcstr::RcStr;
 use turbo_tasks::{backend::CachedTaskType, turbo_tasks_scope, SessionId, TaskId};
 
@@ -25,9 +25,7 @@ use crate::{
 
 const POT_CONFIG: pot::Config = pot::Config::new().compatibility(pot::Compatibility::V4);
 
-fn pot_serialize_small_vec<T: Serialize>(
-    value: &T,
-) -> anyhow::Result<(SmallVec<[u8; 16]>, RcStrToLocalId)> {
+fn pot_serialize_small_vec<T: Serialize>(value: &T) -> pot::Result<SmallVec<[u8; 16]>> {
     struct SmallVecWrite<'l>(&'l mut SmallVec<[u8; 16]>);
     impl std::io::Write for SmallVecWrite<'_> {
         #[inline]
@@ -49,8 +47,8 @@ fn pot_serialize_small_vec<T: Serialize>(
     }
 
     let mut output = SmallVec::new();
-    let ser_map = interning_serde::to_writer(&POT_CONFIG, value, SmallVecWrite(&mut output))?;
-    Ok((output, ser_map))
+    interning_serde::to_writer(&POT_CONFIG, value, SmallVecWrite(&mut output))?;
+    Ok(output)
 }
 
 fn pot_ser_symbol_map() -> pot::ser::SymbolMap {
@@ -161,10 +159,7 @@ impl<T: KeyValueDatabase + Send + Sync + 'static> BackingStorage
         get(&self.database).unwrap_or_default()
     }
 
-    fn serialize(
-        task: TaskId,
-        data: &Vec<CachedDataItem>,
-    ) -> Result<(SmallVec<[u8; 16]>, RcStrToLocalId)> {
+    fn serialize(task: TaskId, data: &Vec<CachedDataItem>) -> Result<SmallVec<[u8; 16]>> {
         serialize(task, data)
     }
 
@@ -179,8 +174,8 @@ impl<T: KeyValueDatabase + Send + Sync + 'static> BackingStorage
         I: Iterator<
                 Item = (
                     TaskId,
-                    Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
-                    Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
+                    Option<SmallVec<[u8; 16]>>,
+                    Option<SmallVec<[u8; 16]>>,
                 ),
             > + Send
             + Sync,
@@ -368,19 +363,19 @@ impl<T: KeyValueDatabase + Send + Sync + 'static> BackingStorage
         &self,
         tx: Option<&T::ReadTransaction<'_>>,
         task_type: &CachedTaskType,
-    ) -> Option<(TaskId, RcStrToLocalId)> {
+    ) -> Option<TaskId> {
         fn lookup<D: KeyValueDatabase>(
             database: &D,
             tx: &D::ReadTransaction<'_>,
             task_type: &CachedTaskType,
-        ) -> Result<Option<(TaskId, RcStrToLocalId)>> {
-            let (task_type, map) = interning_serde::to_vec(&POT_CONFIG, task_type)?;
+        ) -> Result<Option<TaskId>> {
+            let task_type = interning_serde::to_vec(&POT_CONFIG, task_type)?;
             let Some(bytes) = database.get(tx, KeySpace::ForwardTaskCache, &task_type)? else {
                 return Ok(None);
             };
             let bytes = bytes.borrow().try_into()?;
             let id = TaskId::try_from(u32::from_le_bytes(bytes)).unwrap();
-            Ok(Some((id, map)))
+            Ok(Some(id))
         }
         if self.database.is_empty() {
             // Checking if the database is empty is a performance optimization
@@ -536,7 +531,7 @@ where
     {
         let _span =
             tracing::trace_span!("update operations", operations = operations.len()).entered();
-        let (operations, rcstr_map) = pot_serialize_small_vec(&operations)
+        let operations = pot_serialize_small_vec(&operations)
             .with_context(|| anyhow!("Unable to serialize operations"))?;
         batch
             .put(
@@ -586,8 +581,8 @@ where
     I: Iterator<
             Item = (
                 TaskId,
-                Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
-                Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
+                Option<SmallVec<[u8; 16]>>,
+                Option<SmallVec<[u8; 16]>>,
             ),
         > + Send
         + Sync,
@@ -606,14 +601,14 @@ where
                     if let Some(batch) = batch {
                         let key = IntKey::new(*task_id);
                         let key = key.as_ref();
-                        if let Some((meta, rcstr_map)) = meta {
+                        if let Some(meta) = meta {
                             batch.put(
                                 KeySpace::TaskMeta,
                                 WriteBuffer::Borrowed(key),
                                 WriteBuffer::SmallVec(meta),
                             )?;
                         }
-                        if let Some((data, rcstr_map)) = data {
+                        if let Some(data) = data {
                             batch.put(
                                 KeySpace::TaskData,
                                 WriteBuffer::Borrowed(key),
@@ -621,21 +616,12 @@ where
                             )?;
                         }
                     } else {
-                        let (meta, rcstr_map1) = match meta {
-                            Some((meta, rcstr_map)) => {
-                                (Some(WriteBuffer::SmallVec(meta)), rcstr_map)
-                            }
-                            None => (None, RcStrToLocalId::default()),
-                        };
-                        let (data, rcstr_map2) = match data {
-                            Some((data, rcstr_map)) => {
-                                (Some(WriteBuffer::SmallVec(data)), rcstr_map)
-                            }
-                            None => (None, RcStrToLocalId::default()),
-                        };
-
                         // Store the new task data
-                        result.push((task_id, meta, data));
+                        result.push((
+                            task_id,
+                            meta.map(WriteBuffer::SmallVec),
+                            data.map(WriteBuffer::SmallVec),
+                        ));
                     }
                 }
 
@@ -645,10 +631,7 @@ where
         .collect::<Result<Vec<_>>>()
 }
 
-fn serialize(
-    task: TaskId,
-    data: &Vec<CachedDataItem>,
-) -> Result<(SmallVec<[u8; 16]>, RcStrToLocalId)> {
+fn serialize(task: TaskId, data: &Vec<CachedDataItem>) -> Result<SmallVec<[u8; 16]>> {
     Ok(match pot_serialize_small_vec(data) {
         #[cfg(not(feature = "verify_serialization"))]
         Ok(value) => value,

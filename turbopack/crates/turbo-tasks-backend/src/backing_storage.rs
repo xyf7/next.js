@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use smallvec::SmallVec;
-use turbo_persistence::interning_serde::RcStrToLocalId;
 use turbo_tasks::{backend::CachedTaskType, SessionId, TaskId};
 
 use crate::{
@@ -20,10 +19,7 @@ pub trait BackingStorage: 'static + Send + Sync {
     fn next_session_id(&self) -> SessionId;
     fn uncompleted_operations(&self) -> Vec<AnyOperation>;
     #[allow(clippy::ptr_arg)]
-    fn serialize(
-        task: TaskId,
-        data: &Vec<CachedDataItem>,
-    ) -> Result<(SmallVec<[u8; 16]>, RcStrToLocalId)>;
+    fn serialize(task: TaskId, data: &Vec<CachedDataItem>) -> Result<SmallVec<[u8; 16]>>;
     fn save_snapshot<I>(
         &self,
         session_id: SessionId,
@@ -35,8 +31,8 @@ pub trait BackingStorage: 'static + Send + Sync {
         I: Iterator<
                 Item = (
                     TaskId,
-                    Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
-                    Option<(SmallVec<[u8; 16]>, RcStrToLocalId)>,
+                    Option<SmallVec<[u8; 16]>>,
+                    Option<SmallVec<[u8; 16]>>,
                 ),
             > + Send
             + Sync;
@@ -48,7 +44,7 @@ pub trait BackingStorage: 'static + Send + Sync {
         &self,
         tx: Option<&Self::ReadTransaction<'_>>,
         key: &CachedTaskType,
-    ) -> Option<(TaskId, RcStrToLocalId)>;
+    ) -> Option<TaskId>;
     /// # Safety
     ///
     /// `tx` must be a transaction from this BackingStorage instance.
