@@ -26,8 +26,6 @@ impl AttachedFileSystem {
         child_path: FileSystemPath,
         child_fs: ResolvedVc<Box<dyn FileSystem>>,
     ) -> Result<Vc<Self>> {
-        let child_path = child_path.await?;
-
         Ok(AttachedFileSystem {
             root_fs: child_path.fs,
             child_path: child_path.path.clone(),

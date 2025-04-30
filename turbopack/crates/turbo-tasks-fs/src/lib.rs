@@ -197,7 +197,7 @@ fn create_semaphore() -> tokio::sync::Semaphore {
 #[turbo_tasks::value_trait]
 pub trait FileSystem: ValueToString {
     /// Returns the path to the root of the file system.
-    fn root(self: Vc<Self>) -> FileSystemPath {
+    fn root(self: Vc<Self>) -> Vc<FileSystemPath> {
         FileSystemPath::new_normalized(self, RcStr::default())
     }
     fn read(self: Vc<Self>, fs_path: FileSystemPath) -> Vc<FileContent>;
@@ -1202,13 +1202,11 @@ impl FileSystemPathOption {
     }
 }
 
-#[turbo_tasks::value_impl]
 impl FileSystemPath {
     /// Create a new FileSystemPath from a path withing a FileSystem. The
     /// /-separated path is expected to be already normalized (this is asserted
     /// in dev mode).
-    #[turbo_tasks::function]
-    fn new_normalized(fs: ResolvedVc<Box<dyn FileSystem>>, path: RcStr) -> Vc<Self> {
+    fn new_normalized(fs: ResolvedVc<Box<dyn FileSystem>>, path: RcStr) -> Self {
         // On Windows, the path must be converted to a unix path before creating. But on
         // Unix, backslashes are a valid char in file names, and the path can be
         // provided by the user, so we allow it.
@@ -1222,21 +1220,19 @@ impl FileSystemPath {
             "path {} must be normalized",
             path,
         );
-        Self::cell(FileSystemPath { fs, path })
+        FileSystemPath { fs, path }
     }
 
     /// Adds a subpath to the current path. The /-separate path argument might
     /// contain ".." or "." seqments, but it must not leave the root of the
     /// filesystem.
-    #[turbo_tasks::function]
-    pub async fn join(self: Vc<Self>, path: RcStr) -> Result<Vc<Self>> {
-        let this = self.await?;
-        if let Some(path) = join_path(&this.path, &path) {
-            Ok(Self::new_normalized(*this.fs, path.into()))
+    pub fn join(&self, path: RcStr) -> Result<Self> {
+        if let Some(path) = join_path(&self.path, &path) {
+            Ok(Self::new_normalized(self.fs, path.into()))
         } else {
             bail!(
                 "FileSystemPath(\"{}\").join(\"{}\") leaves the filesystem root",
-                this.path,
+                self.path,
                 path
             );
         }
